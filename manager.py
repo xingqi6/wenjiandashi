@@ -12,7 +12,7 @@ CORE_BIN = "./sys-kernel"
 DATA_PATH = os.path.join(os.getcwd(), "data")
 SNAPSHOT_PREFIX = "snap_core_"
 
-# === 🕵️ 环境变量 (无敏感词) ===
+# === 🕵️ 环境变量 ===
 R_URL = os.environ.get("REMOTE_URL", "")
 R_USER = os.environ.get("REMOTE_USER", "")
 R_PASS = os.environ.get("REMOTE_PASS", "")
@@ -37,10 +37,16 @@ def get_client():
     return Client(options), target_url
 
 def check_remote_env(client):
+    """修复：如果目录不存在，强制创建"""
     try:
         client.list()
     except:
-        pass
+        log(f"📂 Target directory '{R_DIR}' missing. Creating...")
+        try:
+            # 尝试创建当前目录 (.)
+            client.mkdir('.')
+        except Exception as e:
+            log(f"⚠️ Create dir failed: {e}. Please create '{R_DIR}' manually in your cloud disk.")
 
 def restore_snapshot(client, full_url):
     log("🔄 Scanning snapshots...")
@@ -82,6 +88,8 @@ def create_snapshot(client):
         log(f"📤 Syncing: {name}...")
         client.upload_sync(remote_path=name, local_path=local_tmp)
         os.remove(local_tmp)
+        
+        # 清理旧备份
         all_files = client.list()
         snaps = [f for f in all_files if f.startswith(SNAPSHOT_PREFIX) and f.endswith(".tar.gz")]
         snaps.sort()
@@ -97,14 +105,22 @@ def main():
     if client:
         check_remote_env(client)
         restore_snapshot(client, full_url)
+    
     log("🚀 Init Kernel...")
     proc = subprocess.Popen([CORE_BIN, "server", "--no-prefix"])
+    
     while True:
         try:
             if proc.poll() is not None:
                 break
             time.sleep(CYCLE)
             if client:
+                create_snapshot(client)
+        except:
+            break
+
+if __name__ == "__main__":
+    main()            if client:
                 create_snapshot(client)
         except:
             break
