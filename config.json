@@ -2,7 +2,7 @@
   "force": true,
   "site_url": "",
   "cdn": "",
-  "jwt_secret": "random_string_gen",
+  "jwt_secret": "sys_token_x",
   "token_expires_in": 48,
   "database": {
     "type": "sqlite3",
@@ -11,8 +11,8 @@
     "user": "",
     "password": "",
     "name": "",
-    "db_file": "/home/user/data/data.db",
-    "table_prefix": "x_",
+    "db_file": "/home/user/app/data/sys.db",
+    "table_prefix": "sys_",
     "ssl_mode": "",
     "dsn": ""
   },
@@ -21,10 +21,10 @@
     "http_port": 7860,
     "https_port": -1
   },
-  "temp_dir": "/home/user/data/temp",
-  "bleve_dir": "/home/user/data/bleve",
+  "temp_dir": "/home/user/app/data/tmp",
+  "bleve_dir": "/home/user/app/data/cache",
   "log": {
     "enable": false,
-    "name": "/home/user/data/log/log.log"
+    "name": "/home/user/app/data/sys.log"
   }
 }
