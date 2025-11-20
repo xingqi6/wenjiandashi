@@ -1,26 +1,46 @@
 FROM alpine:latest
-WORKDIR /app
 
-# 1. 安装基础工具 + Python3 + pip
-# 增加 python3 和 py3-pip 是为了运行高级备份脚本
-RUN apk add --no-cache curl tar ca-certificates libc6-compat coreutils python3 py3-pip
+# 1. 安装系统依赖
+RUN apk add --no-cache python3 py3-pip curl tar gzip bash jq ca-certificates libc6-compat
 
-# 2. 安装 WebDAV 客户端库 (关键步骤)
-# --break-system-packages 是为了在 Alpine 新版本中允许安装 pip 包
-RUN pip3 install webdavclient3 requests --break-system-packages
+# 2. 创建专用用户 (HF 强制要求非 root)
+RUN adduser -D -u 1000 user
 
-# 3. 下载并伪装 Alist
-RUN curl -L https://github.com/xingqi6/wenjiandashi/releases/download/latest/alist-linux-musl-amd64.tar.gz -o temp.tar.gz \
-    && tar -zxvf temp.tar.gz \
-    && mv alist system-worker \
-    && rm temp.tar.gz
+# 3. 准备目录
+RUN mkdir -p /home/user/data && chown -R user:user /home/user
 
-# 4. 复制脚本
-COPY boot.sh .
+# 4. 设置环境变量
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH 
 
-# 5. 权限设置
-RUN mkdir -p data && chmod +x boot.sh system-worker && chown -R 1000:1000 /app
+WORKDIR $HOME/app
 
-USER 1000
+# 5. 创建 Python 虚拟环境并安装依赖
+ENV VIRTUAL_ENV=$HOME/venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+RUN pip install --no-cache-dir requests webdavclient3 --break-system-packages
+
+# 6. 下载 Alist 并伪装成 system-service
+RUN curl -L https://github.com/alist-org/alist/releases/latest/download/alist-linux-musl-amd64.tar.gz -o alist.tar.gz \
+    && tar -zxvf alist.tar.gz \
+    && mv alist system-service \
+    && rm alist.tar.gz \
+    && chmod +x system-service
+
+# 7. 复制脚本和配置
+COPY --chown=user sync_data.sh $HOME/app/
+COPY --chown=user config.json $HOME/app/data/config.json
+
+# 8. 赋予权限
+RUN chmod +x $HOME/app/sync_data.sh
+RUN chown -R user:user /home/user
+
+# 9. 切换用户
+USER user
+
+# 10. 暴露端口
 EXPOSE 7860
-CMD ["./boot.sh"]
+
+# 11. 启动
+CMD ["/bin/bash", "/home/user/app/sync_data.sh"]
