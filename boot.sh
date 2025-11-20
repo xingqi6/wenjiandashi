@@ -1,23 +1,10 @@
-#!/bin/sh
+#!/bin/bash
 
-# === 1. 基础配置 ===
+# === 基础变量 ===
 BIN_NAME="system-worker"
 DATA_DIR="data"
-DB_FILE="$DATA_DIR/data.db"
 
-# === 2. 云端存储配置 (spar 文件夹) ===
-# 远程文件夹名称
-REMOTE_FOLDER="spar"
-# 索引文件 (记录当前版本)
-REMOTE_IDX_FILE="sys_ver.id"
-# 备份文件前缀
-REMOTE_FILE_PREFIX="sys_core"
-# 备份文件后缀
-REMOTE_FILE_EXT=".bin"
-# 保留备份数量
-MAX_BACKUPS=5
-
-# === 3. 生成配置文件 (锁定端口 7860) ===
+# === 1. 生成配置文件 ===
 mkdir -p $DATA_DIR/temp $DATA_DIR/cache
 cat > $DATA_DIR/config.json <<EOF
 {
@@ -36,75 +23,181 @@ cat > $DATA_DIR/config.json <<EOF
 }
 EOF
 
-# === 4. 工具函数 ===
+# === 2. 定义 Python 脚本 ===
+# 我们将 Python 逻辑封装在这个函数里，通过参数调用不同的功能
+run_python_task() {
+    python3 -c "
+import os
+import sys
+import tarfile
+import time
+import shutil
+from webdav3.client import Client
 
-# 构建完整的远程基础 URL (确保以 / 结尾)
-# 逻辑：SYNC_URL + spar/
-# 例如: https://dav.jianguoyun.com/dav/ + spar/
-getFullRemotePath() {
-    echo "${SYNC_URL}${REMOTE_FOLDER}/"
+# 从环境变量获取配置
+options = {
+    'webdav_hostname': os.environ.get('SYNC_URL', '').rstrip('/'), # 去掉末尾斜杠
+    'webdav_login':    os.environ.get('SYNC_USER'),
+    'webdav_password': os.environ.get('SYNC_PASS')
+}
+remote_folder = 'spar'
+local_data_dir = 'data'
+max_backups = 5
+
+# 任务类型: 'restore', 'backup'
+action = sys.argv[1]
+
+def get_client():
+    if not options['webdav_hostname']: return None
+    return Client(options)
+
+def ensure_folder(client):
+    # 检查并创建 spar 目录
+    if not client.check(remote_folder):
+        client.mkdir(remote_folder)
+        print(f'📁 Created remote folder: {remote_folder}')
+
+def do_restore():
+    client = get_client()
+    if not client: return
+    
+    ensure_folder(client)
+    
+    # 获取 spar 目录下的文件
+    files = client.list(remote_folder)
+    # 筛选出备份文件 (alist_backup_xxx.tar.gz)
+    backups = [f for f in files if f.endswith('.tar.gz') and 'alist_backup_' in f]
+    
+    if not backups:
+        print('✨ No backup found on remote. New installation.')
+        sys.exit(1) # 返回 1 表示没找到备份，需要立即备份
+        
+    # 排序找到最新的
+    backups.sort()
+    latest = backups[-1] # 最后一个是最新的
+    remote_path = f'{remote_folder}/{latest}'
+    local_tmp = f'/tmp/{latest}'
+    
+    print(f'📥 Downloading backup: {latest} ...')
+    client.download_sync(remote_path=remote_path, local_path=local_tmp)
+    
+    # 解压
+    print(f'📦 Extracting to {local_data_dir} ...')
+    if os.path.exists(local_data_dir):
+        shutil.rmtree(local_data_dir)
+    os.makedirs(local_data_dir, exist_ok=True)
+    
+    with tarfile.open(local_tmp, 'r:gz') as tar:
+        tar.extractall(path='.') # data 目录包含在压缩包里
+        
+    os.remove(local_tmp)
+    print('✅ Restore complete.')
+    sys.exit(0) # 成功
+
+def do_backup():
+    client = get_client()
+    if not client: return
+
+    ensure_folder(client)
+
+    # 1. 打包 data 目录
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    filename = f'alist_backup_{timestamp}.tar.gz'
+    local_tmp = f'/tmp/{filename}'
+    
+    print(f'🗜️ Compressing {local_data_dir}...')
+    with tarfile.open(local_tmp, 'w:gz') as tar:
+        tar.add(local_data_dir)
+        
+    # 2. 上传
+    remote_path = f'{remote_folder}/{filename}'
+    print(f'📤 Uploading to {remote_path}...')
+    client.upload_sync(remote_path=remote_path, local_path=local_tmp)
+    os.remove(local_tmp)
+    
+    # 3. 轮替 (删除旧备份)
+    files = client.list(remote_folder)
+    backups = [f for f in files if f.endswith('.tar.gz') and 'alist_backup_' in f]
+    backups.sort()
+    
+    if len(backups) > max_backups:
+        to_delete = backups[:len(backups) - max_backups]
+        for f in to_delete:
+            print(f'🗑️ Deleting old backup: {f}')
+            client.clean(f'{remote_folder}/{f}')
+    
+    print('✅ Backup task done.')
+
+if __name__ == '__main__':
+    try:
+        if action == 'restore':
+            do_restore()
+        elif action == 'backup':
+            do_backup()
+    except Exception as e:
+        print(f'❌ Error: {e}')
+        sys.exit(2)
+" "$1"
 }
 
-# 获取云端版本号
-get_remote_version() {
-    BASE_URL=$(getFullRemotePath)
-    curl -s -f -u "$SYNC_USER:$SYNC_PASS" "${BASE_URL}${REMOTE_IDX_FILE}" | tr -d -c 0-9
-}
+# === 3. 主流程 ===
 
-# 确保云端文件夹存在
-ensure_remote_folder() {
-    if [ -n "$SYNC_URL" ]; then
-        FULL_URL=$(getFullRemotePath)
-        echo "📂 Checking/Creating remote folder: ${REMOTE_FOLDER} ..."
-        # 发送 MKCOL 请求创建目录 (如果目录已存在会返回错误，我们忽略错误)
-        curl -s -X MKCOL -u "$SYNC_USER:$SYNC_PASS" "$FULL_URL" >/dev/null 2>&1
-    fi
-}
-
-# 执行单次备份逻辑
-perform_backup() {
-    # 获取当前版本
-    CUR_VER=$(get_remote_version)
-    [ -z "$CUR_VER" ] && CUR_VER=0
-    
-    # 计算下一个版本 (1-5 循环)
-    NEXT_VER=$(( (CUR_VER % MAX_BACKUPS) + 1 ))
-    
-    NEXT_FILE="${REMOTE_FILE_PREFIX}_${NEXT_VER}${REMOTE_FILE_EXT}"
-    BASE_URL=$(getFullRemotePath)
-    
-    echo "📤 Uploading backup to slot ${NEXT_VER} (${REMOTE_FOLDER}/${NEXT_FILE})..."
-    
-    curl -L -f -s -u "$SYNC_USER:$SYNC_PASS" -T "$DB_FILE" "${BASE_URL}${NEXT_FILE}"
-    
-    if [ $? -eq 0 ]; then
-        # 上传索引
-        echo "$NEXT_VER" > ver.tmp
-        curl -L -f -s -u "$SYNC_USER:$SYNC_PASS" -T ver.tmp "${BASE_URL}${REMOTE_IDX_FILE}"
-        rm ver.tmp
-        echo "✅ Backup success at $(date)"
-    else
-        echo "❌ Backup failed at $(date)"
-    fi
-}
-
-# === 5. 主逻辑开始 ===
-
-# 标记：是否需要立即备份 (默认为 false)
-NEED_IMMEDIATE_BACKUP=false
+NEED_INIT_BACKUP=false
 
 if [ -n "$SYNC_URL" ]; then
-  # 步骤 A: 确保 spar 文件夹存在
-  ensure_remote_folder
-  
-  BASE_URL=$(getFullRemotePath)
-  echo "🔍 Checking remote data in ${REMOTE_FOLDER}..."
-  
-  LATEST_VER=$(get_remote_version)
-  
-  if [ -n "$LATEST_VER" ] && [ "$LATEST_VER" -gt 0 ]; then
-    # === 场景 1: 发现备份 -> 恢复 ===
-    TARGET_FILE="${REMOTE_FILE_PREFIX}_${LATEST_VER}${REMOTE_FILE_EXT}"
+    echo "🔍 Checking remote backups..."
+    # 执行 Python 恢复逻辑
+    run_python_task "restore"
+    
+    # 获取 Python 脚本的返回值 ($?)
+    # 0 = 恢复成功
+    # 1 = 没找到备份 (新系统)
+    RET=$?
+    if [ $RET -eq 1 ]; then
+        NEED_INIT_BACKUP=true
+    fi
+else
+    echo "⚠️ SYNC_URL not set. Skipping sync."
+fi
+
+# === 4. 密码注入 (仅在新系统时) ===
+if [ "$NEED_INIT_BACKUP" = true ] && [ -n "$SERVER_KEY" ]; then
+  echo "🔐 Setting initial password..."
+  ./$BIN_NAME admin set "$SERVER_KEY" >/dev/null 2>&1
+fi
+
+# === 5. 启动 Alist 后台 ===
+echo "🚀 Starting System Service..."
+./$BIN_NAME server --no-prefix &
+PID=$!
+
+# === 6. 备份守护进程 ===
+if [ -n "$SYNC_URL" ]; then
+    (
+        # 等待程序完全启动
+        sleep 20
+        
+        # 如果是新系统，立即备份一次
+        if [ "$NEED_INIT_BACKUP" = true ]; then
+            echo "⚡ Fresh install. Creating first backup..."
+            run_python_task "backup"
+        fi
+        
+        # 定时循环
+        INTERVAL_MIN=${SYNC_INTERVAL:-60}
+        INTERVAL_SEC=$(($INTERVAL_MIN * 60))
+        echo "🔄 Auto-backup scheduler started. Interval: ${INTERVAL_MIN} min."
+        
+        while true; do
+            sleep $INTERVAL_SEC
+            echo "⏰ Triggering scheduled backup..."
+            run_python_task "backup"
+        done
+    ) &
+fi
+
+# 挂起主进程
+wait $PID    TARGET_FILE="${REMOTE_FILE_PREFIX}_${LATEST_VER}${REMOTE_FILE_EXT}"
     echo "📥 Found version $LATEST_VER. Restoring..."
     
     curl -L -f -s -u "$SYNC_USER:$SYNC_PASS" "${BASE_URL}${TARGET_FILE}" -o "$DB_FILE"
