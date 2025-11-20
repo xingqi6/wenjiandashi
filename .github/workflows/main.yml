@@ -1,4 +1,4 @@
-name: Build System Service
+name: Build Core Service
 on:
   push:
     branches: [ "main" ]
